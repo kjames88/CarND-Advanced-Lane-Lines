@@ -3,21 +3,47 @@ import cv2
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import glob
+# Import everything needed to edit/save/watch video clips
+from moviepy.editor import VideoFileClip
 
 plt.ioff()  # turn off interactive mode; requires plt.show() to display on screen
 
 
 class Line():
     def __init__(self):
+        self.N = 10
         self.detected_q = False  # line detected in last frame
         self.xfit_q = []         # previous fit points
         self.avgx = None         # average x values in previous fits
-        self.poly = None         # average polynomial coeffs
-        self.current_fit = [np.array([False])]
-        self.radius_of_curvature = None
+        self.poly = np.zeros((self.N, 3))   # average polynomial coeffs
+        self.poly_idx = 0
+        self.fit_q = [np.array([False])]
+        self.radius = np.zeros((1,self.N))  # last N radius values (circular buffer)
+        self.radius_idx = 0
         self.diffs = np.array([0,0,0], dtype='float')  # difference in fit coeffs
         self.allx = None  # line pixel x values
         self.ally = None  # line pixel y values
+    def push_poly(self, poly):
+        self.poly[self.poly_idx, :] = poly
+        self.poly_idx = (self.poly_idx + 1) % self.N
+    def get_avg_poly(self):
+        n = len(np.nonzero(self.poly[:,0])[0])
+        if n > 0:
+            return np.sum(self.poly, axis=0) / n
+        return 0
+    def fit_avg_poly(self):
+        ploty = np.linspace(0, 719, 720)
+        fit = self.get_avg_poly()
+        fitx = fit[0]*ploty**2 + fit[1]*ploty + fit[2]
+        return fitx, ploty
+    def push_radius(self, r):
+        self.radius[0, self.radius_idx] = r
+        self.radius_idx = (self.radius_idx + 1) % self.N
+    def get_avg_radius(self):
+        n = len(np.nonzero(self.radius)[0])
+        if n > 0:
+            return np.sum(self.radius) / n
+        return 0
         
 
 
@@ -94,14 +120,12 @@ def get_warp():
     # -- Transform the image to create an overhead-view perspective
 
     #cal_rgb = cv2.cvtColor(calibrated, cv2.COLOR_BGR2RGB)
-    src_pts = np.array([[523,500], [288,661], [1017,661], [763,500]], dtype=np.int32)  # source polygon for perspective transform to rectangle
-    src_pts = src_pts.reshape((-1,1,2))  # NUM_VERTICESx1x2
+    #src_pts = np.array([[523,500], [288,661], [1017,661], [763,500]], dtype=np.int32)  # source polygon for perspective transform to rectangle
+    #src_pts = src_pts.reshape((-1,1,2))  # NUM_VERTICESx1x2
     #cv2.polylines(cal_rgb, [src_pts], True, (0, 0, 255), 2)
 
     src_pts = np.float32([[381,603], [926,603], [998,650], [311,652]])
-    #src_pts = np.float32([[523,500], [288,661], [1017,661], [763,500]])
     dst_pts = np.float32([[310,600], [1000,600], [1000,650], [310,650]])
-    #cal_rgb = cv2.cvtColor(calibrated, cv2.COLOR_BGR2RGB)
     M = cv2.getPerspectiveTransform(src_pts, dst_pts)
     Minv = cv2.getPerspectiveTransform(dst_pts, src_pts)
     return M, Minv
@@ -168,19 +192,32 @@ def find_lines(warped, left_line, right_line):
 
     if left_line.detected_q == True:
         # search around previous line
-        left_fit = left_line.current_fit  # current is still last frame
+        left_fit = left_line.fit_q
         accepted_inds = ((nonzerox >= (left_fit[0]*(nonzeroy**2) + left_fit[1]*nonzeroy + left_fit[2] - hpix)) &
-                         (nonzerox < (left_fit[0]*(nonzeroy**2) + left_fit[1].nonzeroy + left_fit[2] + hpix)))
-        left_inds.append(accepted_inds)
+                         (nonzerox < (left_fit[0]*(nonzeroy**2) + left_fit[1]*nonzeroy + left_fit[2] + hpix)))
+        # sanity check the pixels to make sure something like a line has been detected
+        if len(accepted_inds) > 250:
+            ymin = np.min(nonzeroy[accepted_inds])
+            ymax = np.max(nonzeroy[accepted_inds])
+            if (ymax - ymin) > 100:
+                left_inds.append(accepted_inds)
 
     if right_line.detected_q == True:
         # search around previous line
-        right_fit = right_line.current_fit  # current is still last frame
+        right_fit = right_line.fit_q
         accepted_inds = ((nonzerox >= (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + right_fit[2] - hpix)) &
-                         (nonzerox < (right_fit[0]*(nonzeroy**2) + right_fit[1].nonzeroy + right_fit[2] + hpix)))
-        right_inds.append(accepted_inds)
+                         (nonzerox < (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + right_fit[2] + hpix)))
+        # sanity check the pixels to make sure something like a line has been detected
+        if len(accepted_inds) > 250:
+            ymin = np.min(nonzeroy[accepted_inds])
+            ymax = np.max(nonzeroy[accepted_inds])
+            if (ymax - ymin) > 100:
+                right_inds.append(accepted_inds)
         
     ploty = np.linspace(0, warped.shape[0]-1, warped.shape[0])
+    y_eval = 0.5 * (np.min(ploty) + np.max(ploty))
+    ym_per_pix = 30/720  # meters per pixel in y direction (30 m range of frame)
+    xm_per_pix = 3.7/700 # meters per pixel in x direction (3.7 m std lane width)
     if len(left_inds) > 0:
         left_inds = np.concatenate(left_inds)
         leftx = nonzerox[left_inds]
@@ -191,8 +228,14 @@ def find_lines(warped, left_line, right_line):
         left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
         left_line.allx = leftx
         left_line.ally = lefty
-        left_line.current_fit = left_fit
+        left_line.diffs = left_fit - left_line.fit_q
+        left_line.fit_q = left_fit
         left_line.xfit_q = left_fitx
+        left_line.push_poly(left_fit)
+        # compute radius using new polynomial scaled from pixels to meters
+        left_fit = np.polyfit(lefty*ym_per_pix, leftx*xm_per_pix, 2)
+        r = ((1 + (2*left_fit[0]*y_eval*ym_per_pix + left_fit[1])**2)**1.5) / np.absolute(2*left_fit[0])
+        left_line.push_radius(r)
         left_line.detected_q = True
     else:
         left_line.detected_q = False
@@ -207,8 +250,15 @@ def find_lines(warped, left_line, right_line):
         right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
         right_line.allx = rightx
         right_line.ally = righty
-        right_line.current_fit = right_fit
+        right_line.diffs = right_fit - right_line.fit_q
+        right_line.fit_q = right_fit
         right_line.xfit_q = right_fitx
+        right_line.push_poly(right_fit)
+        # compute radius using new polynomial scaled from pixels to meters
+        right_fit = np.polyfit(righty*ym_per_pix, rightx*xm_per_pix, 2)
+        r = ((1 + (2*right_fit[0]*y_eval*ym_per_pix + right_fit[1])**2)**1.5) / np.absolute(2*right_fit[0])
+        right_line.push_radius(r)
+        print('right params and radius : {}'.format(right_fit))
         right_line.detected_q = True
     else:
         right_line.detected_q = False
@@ -221,45 +271,50 @@ def find_lines(warped, left_line, right_line):
 
 
 
-def main():
-    left_line = Line()
-    right_line = Line()
-    mtx, dist = calibrate()
-    img = cv2.imread('test_images/test4.jpg')
+def process_image(img):
     calibrated = cv2.undistort(img, mtx, dist, None, mtx)
-    #plt.imshow(calibrated)
 
     M, Minv = get_warp()
     binary = frame_to_binary(calibrated)
 
-    warped = cv2.warpPerspective(calibrated, M, (img.shape[1], img.shape[0]), flags=cv2.INTER_LINEAR)
-    plt.imshow(warped, cmap='gray')
     warped = cv2.warpPerspective(binary, M, (img.shape[1], img.shape[0]), flags=cv2.INTER_LINEAR)
     find_lines(warped, left_line, right_line)
 
     window_img = np.dstack((warped, warped, warped)) * 255
+    if left_line.detected_q == True and right_line.detected_q == True:
+        #ploty = np.linspace(0, warped.shape[0]-1, warped.shape[0])
+        #left_line_window1 = np.array([np.transpose(np.vstack([left_line.xfit_q, ploty]))])
+        left_fitx, left_ploty = left_line.fit_avg_poly()
+        left_line_window1 = np.array([np.transpose(np.vstack([left_fitx, left_ploty]))])
+        #right_line_window2 = np.array([np.flipud(np.transpose(np.vstack([right_line.xfit_q, ploty])))])
+        right_fitx, right_ploty = right_line.fit_avg_poly()
+        right_line_window2 = np.array([np.flipud(np.transpose(np.vstack([right_fitx, right_ploty])))])
+        line_pts = np.hstack((left_line_window1, right_line_window2))
+        cv2.fillPoly(window_img, np.int_([line_pts]), (0,255,0))
     if left_line.detected_q == True:
         window_img[left_line.ally, left_line.allx] = [255, 0, 0]
     if right_line.detected_q == True:
         window_img[right_line.ally, right_line.allx] = [0, 0, 255]
-    if left_line.detected_q == True and right_line.detected_q == True:
-        ploty = np.linspace(0, warped.shape[0]-1, warped.shape[0])
-        print('draw poly')
-        left_line_window1 = np.array([np.transpose(np.vstack([left_line.xfit_q, ploty]))])
-        right_line_window2 = np.array([np.flipud(np.transpose(np.vstack([right_line.xfit_q, ploty])))])
-        line_pts = np.hstack((left_line_window1, right_line_window2))
-        cv2.fillPoly(window_img, np.int_([line_pts]), (0,255,0))
 
     unwarped = cv2.warpPerspective(window_img, Minv, (img.shape[1], img.shape[0]), flags=cv2.INTER_LINEAR)
-    result = cv2.addWeighted(cv2.cvtColor(calibrated, cv2.COLOR_BGR2RGB), 1.0, unwarped, 0.3, 0)
-    plt.imshow(result)
-    #plt.plot(left_fitx, ploty, color='yellow')
-    #plt.plot(right_fitx, ploty, color='yellow')
-    plt.show()
-    #M, Minv = get_warp()
-    #warped = cv2.warpPerspective(img, M, (calibrated.shape[1], calibrated.shape[0]), flags=cv2.INTER_LINEAR)
+    result = cv2.addWeighted(calibrated, 1.0, unwarped, 0.3, 0)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    ravg = 0.5 * (left_line.get_avg_radius() + right_line.get_avg_radius())
+    msg = 'Radius {:.0f}m'.format(ravg)
+    cv2.putText(result, msg, (100,100), font, 2, (255,255,255), 2, cv2.LINE_AA)
+    return result
 
 
+
+left_line = Line()
+right_line = Line()
+mtx, dist = calibrate()
+
+def main():
+    project_output = 'project_post.mp4'
+    clip1 = VideoFileClip('project_video.mp4')
+    project_clip = clip1.fl_image(process_image)  # color images required
+    project_clip.write_videofile(project_output, audio=False)
 
 
 
