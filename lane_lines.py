@@ -14,7 +14,7 @@ class Line():
         self.N = 10
         self.detected_q = False  # line detected in last frame
         self.xfit_q = []         # previous fit points
-        self.avgx = None         # average x values in previous fits
+        self.avgx = None         # average x values in previous fit
         self.poly = np.zeros((self.N, 3))   # average polynomial coeffs
         self.poly_idx = 0
         self.fit_q = [np.array([False])]
@@ -226,6 +226,7 @@ def find_lines(warped, left_line, right_line):
         left_fit = np.polyfit(lefty, leftx, 2)
         # use the polynomial to generate x for linspace y values
         left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
+        left_line.avgx = np.mean(left_fitx)
         left_line.allx = leftx
         left_line.ally = lefty
         left_line.diffs = left_fit - left_line.fit_q
@@ -248,6 +249,7 @@ def find_lines(warped, left_line, right_line):
         right_fit = np.polyfit(righty, rightx, 2)
         # use the polynomial to generate x for linspace y values
         right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
+        right_line.avgx = np.mean(right_fitx)
         right_line.allx = rightx
         right_line.ally = righty
         right_line.diffs = right_fit - right_line.fit_q
@@ -281,6 +283,7 @@ def process_image(img):
     find_lines(warped, left_line, right_line)
 
     window_img = np.dstack((warped, warped, warped)) * 255
+    offset_m = 0
     if left_line.detected_q == True and right_line.detected_q == True:
         #ploty = np.linspace(0, warped.shape[0]-1, warped.shape[0])
         #left_line_window1 = np.array([np.transpose(np.vstack([left_line.xfit_q, ploty]))])
@@ -291,6 +294,13 @@ def process_image(img):
         right_line_window2 = np.array([np.flipud(np.transpose(np.vstack([right_fitx, right_ploty])))])
         line_pts = np.hstack((left_line_window1, right_line_window2))
         cv2.fillPoly(window_img, np.int_([line_pts]), (0,255,0))
+        lintercept = left_fitx[-1]
+        rintercept = right_fitx[-1]
+        midpoint = lintercept + (0.5 * (rintercept - lintercept))
+        expected = warped.shape[1] / 2
+        offset = midpoint - expected
+        xm_per_pix = 3.7/700
+        offset_m = offset * xm_per_pix
     if left_line.detected_q == True:
         window_img[left_line.ally, left_line.allx] = [255, 0, 0]
     if right_line.detected_q == True:
@@ -300,7 +310,7 @@ def process_image(img):
     result = cv2.addWeighted(calibrated, 1.0, unwarped, 0.3, 0)
     font = cv2.FONT_HERSHEY_SIMPLEX
     ravg = 0.5 * (left_line.get_avg_radius() + right_line.get_avg_radius())
-    msg = 'Radius {:.0f}m'.format(ravg)
+    msg = 'Radius {:.0f}m Offset {:.2f}m'.format(ravg, offset_m)
     cv2.putText(result, msg, (100,100), font, 2, (255,255,255), 2, cv2.LINE_AA)
     return result
 
