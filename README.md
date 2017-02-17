@@ -66,7 +66,7 @@ The process outlined above corresponds to the lectures.  Following are some spec
 
 ####Binary Image Generation####
 
-The S channel in HLS color space works well as a starting point.  I thresholded this high enough to remove most of the scenery while leaving most of the lane lines.  My threshold strips this image down enough that I kept it without additional masking and then added on gradient filtered pixels.  Sobel x and y gradients are computed using grayscale.  Arctan is then used to compute gradient angle (in this case a large kernel is used in the gradient function).  I found that this output needed to be thresholded to a narrow range to avoid adding too much noise.  I also mixed in a thresholded y-gradient (small kernel) to further limit the retained pixels to more vertical lines.  The two Sobel results are ANDd and then ORd with the S channel to create the binary image used for lane line detection. 
+The S channel in HLS color space works well as a starting point.  I thresholded this high enough to remove most of the scenery while leaving most of the lane lines.  While the S channel is the primary detector, a Red channel threshold is ANDd with the S channel result.  This modification was made to prevent shadows from registering in the final result.  In the interest of preserving lane-like lines, gradient analysis is also used.  Sobel x and y gradients are computed on grayscale.  Arctan is then used to compute gradient angle (in this case a large kernel is used in the gradient function).  I found that this output needed to be thresholded to a narrow range to avoid adding too much noise.  I also mixed in a thresholded y-gradient (small kernel) to further limit the retained pixels to more vertical lines.  The two Sobel results are ANDd and then ORd with the S and R channels to create the binary image used for lane line detection. 
 
 ####Perspective Transform####
 
@@ -83,6 +83,11 @@ I added a small filter to average the lane line polynomial parameters and the co
 ###Results###
 
 The lane is tracked reasonably well.  The computed radius values jump around too much and are sometimes quite different between left and right (displayed is averaged).  More work may be needed on the radius, although smoothing the line parameters helps.  The magnitude is within reason, but the result is not satisfying (yet).
+
+###Pitfalls###
+
+This pipeline can be expected to have difficulty if the road surface is very uneven.  The perspective transform distorts when the car's orientation to the road is not consistent with the designed-in correspondence.  The effect is observed over the first light concrete stripe.  Prior to readjusting the correspondence, the lane projection was severely distorted, and analysis showed major dispersion of pixels toward the top of the frame.  This fix improved the precision of the coordinate selection, but if the road surface turns sharply up or down, failure of the transform can be expected.
+
 
 
 

@@ -23,6 +23,7 @@ class Line():
         self.diffs = np.array([0,0,0], dtype='float')  # difference in fit coeffs
         self.allx = None  # line pixel x values
         self.ally = None  # line pixel y values
+        self.draw_red = False
     def push_poly(self, poly):
         self.poly[self.poly_idx, :] = poly
         self.poly_idx = (self.poly_idx + 1) % self.N
@@ -84,6 +85,10 @@ def frame_to_binary(img):
     # ---- gradient filters for vertical orientation
     # ---- S has superior lighting invariance vs grayscale threshold per lecture
 
+    R = img[:,:,2]
+    bgr_thresh = [75, 255]
+    r_binary = np.zeros_like(R)
+    r_binary[(R >= bgr_thresh[0]) & (R <= bgr_thresh[1])] = 1
     hls = cv2.cvtColor(img, cv2.COLOR_BGR2HLS)
     S = hls[:,:,2]
     hls_thresh = [125, 255]
@@ -109,7 +114,7 @@ def frame_to_binary(img):
     sy_binary[(scaled_sobel >= sobel_thresh[0]) & (scaled_sobel <= sobel_thresh[1])] = 1
 
     binary = np.zeros_like(S)
-    binary[(s_binary == 1) | ((sy_binary == 1) & (dir_binary == 1))] = 1
+    binary[((r_binary == 1) & (s_binary == 1)) | ((sy_binary == 1) & (dir_binary == 1))] = 1
     #color_binary = np.dstack((binary, s_binary, np.zeros_like(dir_binary)))
     return binary
 
@@ -123,9 +128,8 @@ def get_warp():
     #src_pts = np.array([[523,500], [288,661], [1017,661], [763,500]], dtype=np.int32)  # source polygon for perspective transform to rectangle
     #src_pts = src_pts.reshape((-1,1,2))  # NUM_VERTICESx1x2
     #cv2.polylines(cal_rgb, [src_pts], True, (0, 0, 255), 2)
-
-    src_pts = np.float32([[381,603], [926,603], [998,650], [311,652]])
-    dst_pts = np.float32([[310,600], [1000,600], [1000,650], [310,650]])
+    src_pts = np.float32([[320,648], [1000,648], [805,525], [488,525]])
+    dst_pts = np.float32([[320,648], [1000,648], [1000,525], [320,525]])
     M = cv2.getPerspectiveTransform(src_pts, dst_pts)
     Minv = cv2.getPerspectiveTransform(dst_pts, src_pts)
     return M, Minv
@@ -213,13 +217,17 @@ def find_lines(warped, left_line, right_line):
             ymax = np.max(nonzeroy[accepted_inds])
             if (ymax - ymin) > 100:
                 right_inds.append(accepted_inds)
-        
+    
+    
     ploty = np.linspace(0, warped.shape[0]-1, warped.shape[0])
-    y_eval = 0.5 * (np.min(ploty) + np.max(ploty))
+    y_eval = np.max(ploty)
     ym_per_pix = 30/720  # meters per pixel in y direction (30 m range of frame)
     xm_per_pix = 3.7/700 # meters per pixel in x direction (3.7 m std lane width)
     if len(left_inds) > 0:
         left_inds = np.concatenate(left_inds)
+    else:
+        left_inds = np.array([])
+    if left_inds.shape[0] > 0:
         leftx = nonzerox[left_inds]
         lefty = nonzeroy[left_inds]
         # fit a polynomial to the points selected above
@@ -238,11 +246,15 @@ def find_lines(warped, left_line, right_line):
         r = ((1 + (2*left_fit[0]*y_eval*ym_per_pix + left_fit[1])**2)**1.5) / np.absolute(2*left_fit[0])
         left_line.push_radius(r)
         left_line.detected_q = True
+        left_line.draw_red = False
     else:
         left_line.detected_q = False
 
     if len(right_inds) > 0:
         right_inds = np.concatenate(right_inds)
+    else:
+        right_inds = np.array([])
+    if right_inds.shape[0] > 0:
         rightx = nonzerox[right_inds]
         righty = nonzeroy[right_inds]
         # fit a polynomial to the points selected above
@@ -262,8 +274,27 @@ def find_lines(warped, left_line, right_line):
         right_line.push_radius(r)
         print('right params and radius : {}'.format(right_fit))
         right_line.detected_q = True
+        right_line.draw_red = False
     else:
         right_line.detected_q = False
+
+    # sanity check both lines relative to each other
+    if left_line.detected_q == True and right_line.detected_q == True:
+        hdist = right_line.xfit_q - left_line.xfit_q
+        # reject lines if the distance between them is not reasonably consistent
+        # distance should also be around 700 pixels
+        dmax = np.max(hdist)
+        dmin = np.min(hdist)
+        if (dmax > 1.5 * dmin):
+            left_line.detected_q = False
+            right_line.detected_q = False
+        #else:
+        #    # there is too much noise in the radius to expect a match, so look for opposite curve direction instead
+        #    curve_dir_left = left_line.xfit_q[0] < left_line.xfit_q[-1] ? -1 : (left_line.xfit_q[0] == left_line.xfit_q[-1] ? 0 : 1)
+        #    curve_dir_right = right_line.xfit_q[0] < right_line.xfit_q[-1] : (right_line.xfit_q[0] == right_line.xfit_q[-1] ? 0 : 1)
+        #    if curve_dir_left = -curve_dir_right:
+        #        left_line.detected_q = False
+        #        right_line.detected_q = False
 
     # draw the selected points in color on the output image
     #out_img[nonzeroy[left_inds], nonzerox[left_inds]] = [255, 0, 0]
@@ -285,14 +316,14 @@ def process_image(img):
     window_img = np.dstack((warped, warped, warped)) * 255
     offset_m = 0
     if left_line.detected_q == True and right_line.detected_q == True:
-        #ploty = np.linspace(0, warped.shape[0]-1, warped.shape[0])
-        #left_line_window1 = np.array([np.transpose(np.vstack([left_line.xfit_q, ploty]))])
         left_fitx, left_ploty = left_line.fit_avg_poly()
         left_line_window1 = np.array([np.transpose(np.vstack([left_fitx, left_ploty]))])
-        #right_line_window2 = np.array([np.flipud(np.transpose(np.vstack([right_line.xfit_q, ploty])))])
         right_fitx, right_ploty = right_line.fit_avg_poly()
         right_line_window2 = np.array([np.flipud(np.transpose(np.vstack([right_fitx, right_ploty])))])
         line_pts = np.hstack((left_line_window1, right_line_window2))
+        #if left_line.draw_red == True or right_line.draw_red == True:
+        #    cv2.fillPoly(window_img, np.int_([line_pts]), (128,128,128))
+        #else:
         cv2.fillPoly(window_img, np.int_([line_pts]), (0,255,0))
         lintercept = left_fitx[-1]
         rintercept = right_fitx[-1]
@@ -308,6 +339,7 @@ def process_image(img):
 
     unwarped = cv2.warpPerspective(window_img, Minv, (img.shape[1], img.shape[0]), flags=cv2.INTER_LINEAR)
     result = cv2.addWeighted(calibrated, 1.0, unwarped, 0.3, 0)
+
     font = cv2.FONT_HERSHEY_SIMPLEX
     ravg = 0.5 * (left_line.get_avg_radius() + right_line.get_avg_radius())
     msg = 'Radius {:.0f}m Offset {:.2f}m'.format(ravg, offset_m)
